@@ -137,11 +137,8 @@ public class ValidateSignedMail
         SignedMailValidator validator = new SignedMailValidator(msg, param);
 
         // iterate over all signatures and print results
-        Iterator it = validator.getSignerInformationStore().getSigners()
-                .iterator();
-        while (it.hasNext())
+        for (SignerInformation signer : validator.getSignerInformationStore().getSigners())
         {
-            SignerInformation signer = (SignerInformation) it.next();
             SignedMailValidator.ValidationResult result = validator
                     .getValidationResult(signer);
             if (result.isValidSignature())
@@ -220,11 +217,9 @@ public class ValidateSignedMail
                 }
 
                 System.out.println("Notifications:");
-                Iterator notificationsIt = review.getNotifications(-1)
-                        .iterator();
-                while (notificationsIt.hasNext())
+                for (Object o : review.getNotifications(-1))
                 {
-                    ErrorBundle noteMsg = (ErrorBundle) notificationsIt.next();
+                    ErrorBundle noteMsg = (ErrorBundle)o;
                     System.out.println("\t" + noteMsg.getText(loc));
                 }
 
@@ -260,11 +255,9 @@ public class ValidateSignedMail
 
                     // notifications
                     System.out.println("\tNotifications:");
-                    notificationsIt = review.getNotifications(i).iterator();
-                    while (notificationsIt.hasNext())
+                    for (Object o : review.getNotifications(i))
                     {
-                        ErrorBundle noteMsg = (ErrorBundle) notificationsIt
-                                .next();
+                        ErrorBundle noteMsg = (ErrorBundle)o;
                         if (dbgLvl == DETAIL)
                         {
                             System.out.println("\t\t" + noteMsg.getDetail(loc));
