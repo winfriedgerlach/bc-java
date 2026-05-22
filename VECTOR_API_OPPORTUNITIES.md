@@ -27,6 +27,15 @@ also possible but yields less.
 Hot in TLS 1.3, WireGuard, anything with ChaCha20-Poly1305. Likely the
 single highest-ROI item in the tree.
 
+Result:
+```
+The kernel correctness is solid but the AVX2 path runs ~0.6× scalar throughput here. The QR rounds appear to be
+JIT-compiled at C2 level 4, but the dominant costs look register-pressure-related (16 active state vectors + 16 saved
+initial copies on a 16-YMM register file). Future work: try a 4-block kernel that recomputes initial-state broadcasts
+on the add-back instead of holding them, or move the I/O XOR into a ByteVector form.
+AVX-512 should win out of the box because of native vprolld.
+```
+
 ### 2. ML-KEM and ML-DSA NTT butterflies
 - `core/src/main/java/org/bouncycastle/pqc/crypto/mlkem/Ntt.java`
 - `core/src/main/java/org/bouncycastle/pqc/crypto/mldsa/Ntt.java`
@@ -40,6 +49,8 @@ On the critical path of every keygen / encap / decap / sign / verify. PQC is
 increasingly the dominant cost in handshakes, and NTT is the #1 PQC
 bottleneck.
 
+Result:
+```
 === ML-KEM bench ===
 WARNING: Using incubator modules: jdk.incubator.vector
 ML-KEM ntt (forward)        vector:    1156 ns/op   scalar:    1383 ns/op   speedup: 1,20x
@@ -48,6 +59,7 @@ ML-KEM invNtt (inverse)     vector:    1338 ns/op   scalar:    2213 ns/op   spee
 WARNING: Using incubator modules: jdk.incubator.vector
 ML-DSA ntt (forward)        vector:    2625 ns/op   scalar:    2237 ns/op   speedup: 0,85x
 ML-DSA invNttToMont         vector:    2738 ns/op   scalar:    2556 ns/op   speedup: 0,93x
+```
 
 ### 3. BLAKE2b / BLAKE3 G function
 - `core/src/main/java/org/bouncycastle/crypto/digests/Blake2bDigest.java:516` (`G`)
@@ -90,6 +102,25 @@ The schedule (`W[t] = σ1(W[t-2]) + W[t-7] + σ0(W[t-15]) + W[t-16]`) has no
 loop-carried dependency in groups of 4 and is a known SIMD target. Main
 compression loop is serial — you can't touch that. Net per-hash gain
 ~1.3–1.5x. Multi-message batching (LMS/HSS, SPHINCS+) is the bigger door.
+
+In practice the four-wide claim is generous: `W[t+2]` reads `W[t]` (the
+value just being computed), so without the standard "split σ1" intrinsic
+trick the algorithmic ceiling is two lanes per iteration. The 2-lane
+overlay (`SHA256VectorImpl` / `SHA512VectorImpl`) goes through
+`IntVector.SPECIES_64` / `LongVector.SPECIES_128`, leaving the unrolled
+compression body scalar.
+
+=== SHA schedule bench (JDK 25, AVX2 host: IntVector.SPECIES_PREFERRED = 256-bit / 8 lanes) ===
+WARNING: Using incubator modules: jdk.incubator.vector
+SHA-256 schedule        vector:      80 ns/op   scalar:      90 ns/op   speedup: 1,12x
+SHA-512 schedule        vector:     120 ns/op   scalar:     144 ns/op   speedup: 1,19x
+
+A small but real win, in line with the doc's "schedule alone is the
+cheap part" framing — the schedule runs in roughly 25% of total
+processBlock time, so the end-to-end per-hash gain is below 5%. A 4-lane
+intrinsic-style implementation with the σ1 split would go further but
+hasn't been pursued; the bigger door is still cross-message batching for
+LMS/HSS/SLH-DSA (#7).
 
 ### 7. SPHINCS+/SLH-DSA and LMS/HSS batched hashes
 - `core/src/main/java/org/bouncycastle/pqc/crypto/slhdsa/HT.java:149` (`treehash`)
