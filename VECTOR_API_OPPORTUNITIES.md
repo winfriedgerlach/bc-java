@@ -40,6 +40,15 @@ On the critical path of every keygen / encap / decap / sign / verify. PQC is
 increasingly the dominant cost in handshakes, and NTT is the #1 PQC
 bottleneck.
 
+=== ML-KEM bench ===
+WARNING: Using incubator modules: jdk.incubator.vector
+ML-KEM ntt (forward)        vector:    1156 ns/op   scalar:    1383 ns/op   speedup: 1,20x
+ML-KEM invNtt (inverse)     vector:    1338 ns/op   scalar:    2213 ns/op   speedup: 1,65x
+=== ML-DSA bench ===
+WARNING: Using incubator modules: jdk.incubator.vector
+ML-DSA ntt (forward)        vector:    2625 ns/op   scalar:    2237 ns/op   speedup: 0,85x
+ML-DSA invNttToMont         vector:    2738 ns/op   scalar:    2556 ns/op   speedup: 0,93x
+
 ### 3. BLAKE2b / BLAKE3 G function
 - `core/src/main/java/org/bouncycastle/crypto/digests/Blake2bDigest.java:516` (`G`)
 - `core/src/main/java/org/bouncycastle/crypto/digests/Blake3Digest.java:760` (`mixG`)

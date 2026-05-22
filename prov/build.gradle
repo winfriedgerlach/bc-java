@@ -535,11 +535,13 @@ task test25(type: Test) {
 
     jvmArgs = ['-Dtest.java.version.prefix=25',
                '--add-modules=jdk.incubator.vector',
-               // Force-enable the ChaCha vector path on whatever lane
-               // width the test JVM actually offers, regardless of the
-               // production gate, so the regression tests cover SIMD
-               // output everywhere they run.
-               '-Dorg.bouncycastle.chacha.vector.minLanes=4']
+               // Force-enable the SIMD vector paths on whatever lane width
+               // the test JVM actually offers, regardless of the production
+               // gates, so the regression tests cover the vector output
+               // everywhere they run.
+               '-Dorg.bouncycastle.chacha.vector.minLanes=4',
+               '-Dorg.bouncycastle.mlkem.ntt.vector.minLanes=4',
+               '-Dorg.bouncycastle.mldsa.ntt.vector.minLanes=2']
 
 
     finalizedBy jacocoTestReport
