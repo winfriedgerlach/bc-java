@@ -375,6 +375,31 @@ public class Salsa20Engine
         engineState[8] = engineState[9] = 0;
     }
 
+    /**
+     * Hook for subclass overlays (e.g. JDK 17+ Vector API kernels) that have
+     * produced key-stream output for a contiguous run of aligned 64-byte
+     * blocks without going through the byte loop in
+     * {@link #processBytes(byte[], int, int, byte[], int)}.  Updates the
+     * per-IV byte-limit counter and refreshes the internal key-stream cache
+     * so that any subsequent {@code processBytes} or {@code returnByte} call
+     * resumes against the new counter currently held in {@code engineState}.
+     *
+     * @param processedBytes the number of bytes the overlay has already
+     *                       written outside this class; must be a positive
+     *                       multiple of 64.
+     * @throws MaxBytesExceededException if the per-IV 2^70 byte limit would
+     *                                   be exceeded.
+     */
+    protected void noteBlocksProcessed(int processedBytes)
+    {
+        if (limitExceeded(processedBytes))
+        {
+            throw new MaxBytesExceededException("2^70 byte limit per IV would be exceeded; Change IV");
+        }
+        index = 0;
+        generateKeyStream(keyStream);
+    }
+
     protected void setKey(byte[] keyBytes, byte[] ivBytes)
     {
         if (keyBytes != null)

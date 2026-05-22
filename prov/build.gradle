@@ -195,6 +195,10 @@ compileJava17Java {
 compileJava25Java {
     options.release = 25
     options.sourcepath = files(['src/main/java', 'src/main/jdk25'])
+    // The ChaCha vector overlay imports jdk.incubator.vector.  Adding the
+    // module at compile-time only lets the overlay reference the Vector
+    // API; the runtime falls back to scalar when the module is absent.
+    options.compilerArgs += ['--add-modules', 'jdk.incubator.vector']
 }
 
 
@@ -356,6 +360,7 @@ compileTest17Java {
 compileTest25Java {
     options.release = 25
     options.sourcepath = files(['src/test/java', 'src/test/jdk25'])
+    options.compilerArgs += ['--add-modules', 'jdk.incubator.vector']
 }
 
 publishing {
@@ -528,7 +533,13 @@ task test25(type: Test) {
         languageVersion = JavaLanguageVersion.of(25)
     }
 
-    jvmArgs = ['-Dtest.java.version.prefix=25']
+    jvmArgs = ['-Dtest.java.version.prefix=25',
+               '--add-modules=jdk.incubator.vector',
+               // Force-enable the ChaCha vector path on whatever lane
+               // width the test JVM actually offers, regardless of the
+               // production gate, so the regression tests cover SIMD
+               // output everywhere they run.
+               '-Dorg.bouncycastle.chacha.vector.minLanes=4']
 
 
     finalizedBy jacocoTestReport
