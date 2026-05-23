@@ -146,34 +146,62 @@ the scalar reference across all six SHA-2 parameter sets (N=16/24/32).
 Kernel-only bench (compressBatch vs 8 sequential scalar one-block hashes):
 
 WARNING: Using incubator modules: jdk.incubator.vector
-compressBatch (LANES=8)   vector:    3102 ns/call   scalar (x8):    2989 ns/call   speedup: 0,96x
+compressBatch (LANES=8)   vector:    2665 ns/call   scalar (x8):    2616 ns/call   speedup: 0,98x
 
 End-to-end WOTS+ pkGen (batched chain through SHA256BatchedVectorImpl
 vs the original WOTS_LEN-loop, AVX2 host):
 
-sha2-128s WOTS+ pkGen       vector:   228,0 us/op   scalar:   244,0 us/op   speedup: 1,07x
-sha2-192s WOTS+ pkGen       vector:   376,4 us/op   scalar:   386,0 us/op   speedup: 1,03x
-sha2-256s WOTS+ pkGen       vector:   480,1 us/op   scalar:   496,6 us/op   speedup: 1,03x
+sha2-128s WOTS+ pkGen       vector:   261,0 us/op   scalar:   250,9 us/op   speedup: 0,96x
+sha2-192s WOTS+ pkGen       vector:   378,7 us/op   scalar:   370,8 us/op   speedup: 0,98x
+sha2-256s WOTS+ pkGen       vector:   456,7 us/op   scalar:   453,3 us/op   speedup: 0,99x
 
-The predicted 3–4x SLH-DSA speedup does not materialise with a naive
-Vector API kernel: the batched compression body is ~the same speed as
-eight fully-unrolled scalar SHA-256 compressions. BC's
+(WOTS pkGen numbers vary by ~5% across runs from JIT/scheduling noise;
+parking near 1.0x in either direction across the three sizes.)
+
+The predicted 3–4x SLH-DSA speedup does not materialise with the JVM
+Vector API: the batched compression body is essentially the same speed
+as eight fully-unrolled scalar SHA-256 compressions.  BC's
 SHA256Digest.processBlock is heavily unrolled and JIT-optimised
-(~290 ns/block), and HotSpot's per-IntVector-op overhead on the 64-round
-inner loop eats the 8-way lane-parallelism. The W[16..63] expansion
-via an IntVector[16] circular buffer is the suspected hot spot; the
-standard SIMD fix is a fully-unrolled, chunk-of-16 kernel with the W
-rotation expressed via named locals (~700 lines), which would cut
-array-access overhead and unlock most of the missing speedup.
+(~290 ns/block), and HotSpot's per-IntVector-op overhead on the
+64-round inner loop matches that ~290 ns/block per lane in steady
+state — so 8-way lane parallelism collapses back to ~1× rather than
+the 3–4× a C SIMD intrinsic kernel would deliver.
 
-Other things batching would still need to deliver the doc's 3–4x:
+Three kernel shapes were tried:
+- Loop-based with an IntVector[16] W circular buffer kept inside
+  compressBatch (best, current): 2665 ns/call.  HotSpot's escape
+  analysis stack-allocates the array, so the (t+14)&15 / (t+9)&15 /
+  (t+1)&15 reads land on register-resident slots; per-IntVector-op
+  overhead is what's left.
+- Single fully-unrolled body with 16 named w0..w15 locals and the
+  W rotation expressed via reassignment (the "standard SIMD pattern"):
+  ~8 KB of bytecode, above C2's HugeMethodLimit=8000 threshold.
+  HotSpot fell back to the interpreter and the kernel ran ~9× slower
+  (~25 µs/call).
+- Four chunk-of-16 static methods, each well under the size limit, with
+  state and W passed as IntVector[] arrays.  Each chunk compiles fine,
+  but the arrays escape across the call boundary, EA can't eliminate
+  them, and every state[i] / w[i] access becomes a real heap load.
+  Net: 4400 ns/call, worse than the loop.
+
+The HotSpot constraints (method size for full unroll, EA on cross-call
+arrays for chunked unroll) effectively box the achievable speed at the
+loop form's level.  Further wins would need either:
+- An -XX:HugeMethodLimit override at the deployment level (raising it
+  to ~12000 lets the fully-unrolled variant compile, at the cost of a
+  global JVM flag), or
+- Native code via JNI / Project Panama for the inner kernel.
+
+Other things even an ideal kernel would still need to deliver the
+doc's 3–4x at the WOTS pkGen level:
 - Batch the WOTS_LEN scalar PRF calls (35–67 per pkGen).
 - Batch T_l (one ~9-block hash per pkGen).
 - Batch across pkGens (HT.treehash drives 2^H' independent pkGens
   per layer — natural place to widen the batch).
 
-Filed as "primitive + wiring proven correct, unrolled kernel pending".
-The batched WotsPlus.pkGen is engaged on AVX-512 by default
+Filed as "primitive + wiring proven correct; HotSpot Vector API caps
+the achievable kernel speedup at ~1× scalar."  The batched
+WotsPlus.pkGen is engaged on AVX-512 by default
 (minLanes=8) and opt-in on AVX2 via
 `-Dorg.bouncycastle.slhdsa.wots.vector.minLanes=2`.
 ```

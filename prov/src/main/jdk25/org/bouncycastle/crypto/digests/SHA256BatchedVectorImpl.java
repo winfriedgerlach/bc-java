@@ -24,6 +24,29 @@ import jdk.incubator.vector.VectorSpecies;
  * round 0; its value is whatever H1..H8 the caller has memoised
  * up-front (e.g. SHA-256 over {@code pkSeed || zero-pad to 64} for SLH-DSA).
  * <p>
+ * The compression loop holds {@code W[0..15]} in a 16-element
+ * {@code IntVector[]} circular buffer kept entirely inside the method.
+ * HotSpot's escape analysis stack-allocates the array in steady state,
+ * so the indices {@code (t+14)&15} / {@code (t+9)&15} / {@code (t+1)&15}
+ * resolve to register-resident slots.  A fully-unrolled chunk-of-16
+ * variant was attempted (the standard SIMD pattern with 16 named
+ * {@code w0..w15} locals and the W rotation expressed via reassignment)
+ * but failed to win:
+ * <ul>
+ *   <li>A single fully-unrolled method came in at ~8 KB of bytecode,
+ *       above C2's {@code HugeMethodLimit=8000} threshold; HotSpot fell
+ *       back to the interpreter and the kernel ran ~8x slower.</li>
+ *   <li>Splitting into four chunks-of-16 static methods kept each under
+ *       the size limit, but required passing state and W through
+ *       {@code IntVector[]} arrays.  The arrays escape across the
+ *       chunk-method call boundary, EA can't eliminate them, and every
+ *       round body's {@code state[i]} / {@code w[i]} access becomes a
+ *       real heap load — slower than the original loop.</li>
+ * </ul>
+ * The loop form is therefore the best HotSpot variant of this kernel; the
+ * remaining gap relative to scalar is the per-IntVector-op overhead that
+ * Vector API ops pay over native SHA-256 instructions.
+ * <p>
  * Loaded lazily by the JDK 25+ overlay of
  * {@link org.bouncycastle.crypto.signers.slhdsa.WotsPlus}; if
  * {@code jdk.incubator.vector} is absent the overlay catches the linkage
@@ -34,6 +57,8 @@ public final class SHA256BatchedVectorImpl
     private static final VectorSpecies<Integer> SPECIES = pickSpecies();
 
     public static final int LANES = SPECIES.length();
+
+    private static final IntVector[] K_V;
 
     private static VectorSpecies<Integer> pickSpecies()
     {
@@ -81,31 +106,23 @@ public final class SHA256BatchedVectorImpl
         IntVector a = ia, b = ib, c = ic, d = id;
         IntVector e = ie, f = iF, g = ig, h = ih;
 
-        IntVector w0  = IntVector.fromArray(SPECIES, blockData,  0 * LANES);
-        IntVector w1  = IntVector.fromArray(SPECIES, blockData,  1 * LANES);
-        IntVector w2  = IntVector.fromArray(SPECIES, blockData,  2 * LANES);
-        IntVector w3  = IntVector.fromArray(SPECIES, blockData,  3 * LANES);
-        IntVector w4  = IntVector.fromArray(SPECIES, blockData,  4 * LANES);
-        IntVector w5  = IntVector.fromArray(SPECIES, blockData,  5 * LANES);
-        IntVector w6  = IntVector.fromArray(SPECIES, blockData,  6 * LANES);
-        IntVector w7  = IntVector.fromArray(SPECIES, blockData,  7 * LANES);
-        IntVector w8  = IntVector.fromArray(SPECIES, blockData,  8 * LANES);
-        IntVector w9  = IntVector.fromArray(SPECIES, blockData,  9 * LANES);
-        IntVector w10 = IntVector.fromArray(SPECIES, blockData, 10 * LANES);
-        IntVector w11 = IntVector.fromArray(SPECIES, blockData, 11 * LANES);
-        IntVector w12 = IntVector.fromArray(SPECIES, blockData, 12 * LANES);
-        IntVector w13 = IntVector.fromArray(SPECIES, blockData, 13 * LANES);
-        IntVector w14 = IntVector.fromArray(SPECIES, blockData, 14 * LANES);
-        IntVector w15 = IntVector.fromArray(SPECIES, blockData, 15 * LANES);
-
-        // Use a 16-element circular buffer of IntVectors for W, accessed
-        // via array slots (HotSpot's escape analysis can stack-allocate
-        // the IntVector[] in steady state).
         IntVector[] W = new IntVector[16];
-        W[0]  = w0;  W[1]  = w1;  W[2]  = w2;  W[3]  = w3;
-        W[4]  = w4;  W[5]  = w5;  W[6]  = w6;  W[7]  = w7;
-        W[8]  = w8;  W[9]  = w9;  W[10] = w10; W[11] = w11;
-        W[12] = w12; W[13] = w13; W[14] = w14; W[15] = w15;
+        W[0]  = IntVector.fromArray(SPECIES, blockData,  0 * LANES);
+        W[1]  = IntVector.fromArray(SPECIES, blockData,  1 * LANES);
+        W[2]  = IntVector.fromArray(SPECIES, blockData,  2 * LANES);
+        W[3]  = IntVector.fromArray(SPECIES, blockData,  3 * LANES);
+        W[4]  = IntVector.fromArray(SPECIES, blockData,  4 * LANES);
+        W[5]  = IntVector.fromArray(SPECIES, blockData,  5 * LANES);
+        W[6]  = IntVector.fromArray(SPECIES, blockData,  6 * LANES);
+        W[7]  = IntVector.fromArray(SPECIES, blockData,  7 * LANES);
+        W[8]  = IntVector.fromArray(SPECIES, blockData,  8 * LANES);
+        W[9]  = IntVector.fromArray(SPECIES, blockData,  9 * LANES);
+        W[10] = IntVector.fromArray(SPECIES, blockData, 10 * LANES);
+        W[11] = IntVector.fromArray(SPECIES, blockData, 11 * LANES);
+        W[12] = IntVector.fromArray(SPECIES, blockData, 12 * LANES);
+        W[13] = IntVector.fromArray(SPECIES, blockData, 13 * LANES);
+        W[14] = IntVector.fromArray(SPECIES, blockData, 14 * LANES);
+        W[15] = IntVector.fromArray(SPECIES, blockData, 15 * LANES);
 
         for (int t = 0; t < 64; ++t)
         {
@@ -125,14 +142,12 @@ public final class SHA256BatchedVectorImpl
                 W[idx] = wt;
             }
 
-            IntVector kt = IntVector.broadcast(SPECIES, K[t]);
-            IntVector t1 = h.add(sum1(e)).add(ch(e, f, g)).add(kt).add(wt);
-            IntVector t2 = sum0(a).add(maj(a, b, c));
-
+            IntVector T1 = h.add(sum1(e)).add(ch(e, f, g)).add(K_V[t]).add(wt);
+            IntVector T2 = sum0(a).add(maj(a, b, c));
             h = g; g = f; f = e;
-            e = d.add(t1);
+            e = d.add(T1);
             d = c; c = b; b = a;
-            a = t1.add(t2);
+            a = T1.add(T2);
         }
 
         a.add(ia).intoArray(outState, 0 * LANES);
@@ -213,4 +228,14 @@ public final class SHA256BatchedVectorImpl
         0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
         0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
     };
+
+    static
+    {
+        IntVector[] kv = new IntVector[64];
+        for (int i = 0; i < 64; i++)
+        {
+            kv[i] = IntVector.broadcast(SPECIES, K[i]);
+        }
+        K_V = kv;
+    }
 }
