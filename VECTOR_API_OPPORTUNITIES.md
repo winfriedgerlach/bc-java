@@ -103,6 +103,8 @@ loop-carried dependency in groups of 4 and is a known SIMD target. Main
 compression loop is serial — you can't touch that. Net per-hash gain
 ~1.3–1.5x. Multi-message batching (LMS/HSS, SPHINCS+) is the bigger door.
 
+Result:
+
 In practice the four-wide claim is generous: `W[t+2]` reads `W[t]` (the
 value just being computed), so without the standard "split σ1" intrinsic
 trick the algorithmic ceiling is two lanes per iteration. The 2-lane
@@ -110,10 +112,12 @@ overlay (`SHA256VectorImpl` / `SHA512VectorImpl`) goes through
 `IntVector.SPECIES_64` / `LongVector.SPECIES_128`, leaving the unrolled
 compression body scalar.
 
+```
 === SHA schedule bench (JDK 25, AVX2 host: IntVector.SPECIES_PREFERRED = 256-bit / 8 lanes) ===
 WARNING: Using incubator modules: jdk.incubator.vector
 SHA-256 schedule        vector:      80 ns/op   scalar:      90 ns/op   speedup: 1,12x
 SHA-512 schedule        vector:     120 ns/op   scalar:     144 ns/op   speedup: 1,19x
+```
 
 A small but real win, in line with the doc's "schedule alone is the
 cheap part" framing — the schedule runs in roughly 25% of total
@@ -131,6 +135,48 @@ SHA-256 / SHAKE instances with vector message schedules. Bigger lift
 (algorithmic restructuring, not just loop swap) but a real 3–4x on signing
 throughput is plausible. Most impactful for SLH-DSA, which is otherwise
 painfully slow.
+
+Result:
+```
+The 8-lane batched SHA-256 compressor (SHA256BatchedVectorImpl) is
+correct end-to-end — full SLH-DSA sha2-128s sign+verify roundtrips
+through the batched WOTS pkGen, and pkGen output is byte-identical to
+the scalar reference across all six SHA-2 parameter sets (N=16/24/32).
+
+Kernel-only bench (compressBatch vs 8 sequential scalar one-block hashes):
+
+WARNING: Using incubator modules: jdk.incubator.vector
+compressBatch (LANES=8)   vector:    3102 ns/call   scalar (x8):    2989 ns/call   speedup: 0,96x
+
+End-to-end WOTS+ pkGen (batched chain through SHA256BatchedVectorImpl
+vs the original WOTS_LEN-loop, AVX2 host):
+
+sha2-128s WOTS+ pkGen       vector:   228,0 us/op   scalar:   244,0 us/op   speedup: 1,07x
+sha2-192s WOTS+ pkGen       vector:   376,4 us/op   scalar:   386,0 us/op   speedup: 1,03x
+sha2-256s WOTS+ pkGen       vector:   480,1 us/op   scalar:   496,6 us/op   speedup: 1,03x
+
+The predicted 3–4x SLH-DSA speedup does not materialise with a naive
+Vector API kernel: the batched compression body is ~the same speed as
+eight fully-unrolled scalar SHA-256 compressions. BC's
+SHA256Digest.processBlock is heavily unrolled and JIT-optimised
+(~290 ns/block), and HotSpot's per-IntVector-op overhead on the 64-round
+inner loop eats the 8-way lane-parallelism. The W[16..63] expansion
+via an IntVector[16] circular buffer is the suspected hot spot; the
+standard SIMD fix is a fully-unrolled, chunk-of-16 kernel with the W
+rotation expressed via named locals (~700 lines), which would cut
+array-access overhead and unlock most of the missing speedup.
+
+Other things batching would still need to deliver the doc's 3–4x:
+- Batch the WOTS_LEN scalar PRF calls (35–67 per pkGen).
+- Batch T_l (one ~9-block hash per pkGen).
+- Batch across pkGens (HT.treehash drives 2^H' independent pkGens
+  per layer — natural place to widen the batch).
+
+Filed as "primitive + wiring proven correct, unrolled kernel pending".
+The batched WotsPlus.pkGen is engaged on AVX-512 by default
+(minLanes=8) and opt-in on AVX2 via
+`-Dorg.bouncycastle.slhdsa.wots.vector.minLanes=2`.
+```
 
 ## Tier 3 — opportunistic / niche
 

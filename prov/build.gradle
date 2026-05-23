@@ -543,7 +543,8 @@ task test25(type: Test) {
                '-Dorg.bouncycastle.mlkem.ntt.vector.minLanes=4',
                '-Dorg.bouncycastle.mldsa.ntt.vector.minLanes=2',
                '-Dorg.bouncycastle.sha256.vector.minLanes=2',
-               '-Dorg.bouncycastle.sha512.vector.minLanes=2']
+               '-Dorg.bouncycastle.sha512.vector.minLanes=2',
+               '-Dorg.bouncycastle.slhdsa.wots.vector.minLanes=2']
 
 
     finalizedBy jacocoTestReport
