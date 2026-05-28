@@ -73,6 +73,46 @@ per-G vectorization.
 
 Used by Argon2, increasingly by new protocols.
 
+Result:
+```
+The 4-lane SIMD compress is correct end-to-end — RFC 7693 §A.1
+("abc" → ba80a53f...) and the empty-input vector match on both paths,
+and a fuzz test across 12 input sizes plus all valid digest lengths
+(8..512 bits) shows the vector and scalar paths produce byte-identical
+output on the same JVM via the Blake2bDigest.forceScalarPath hook.
+
+Bench (JDK 25, AVX2 host: LongVector.SPECIES_PREFERRED = 256-bit / 4 lanes):
+
+WARNING: Using incubator modules: jdk.incubator.vector
+BLAKE2b 4 KiB           vector:   13,30 us/op   scalar:   10,57 us/op   speedup: 0,79x
+BLAKE2b 64 KiB          vector:  238,88 us/op   scalar:  182,28 us/op   speedup: 0,76x
+
+Net loss of ~24% on this AVX2 host.  The kernel layout is the
+canonical SSE2/AVX2 BLAKE2b pattern (state held as four row-major
+LongVectors, column-G then a lane shuffle then diagonal-G), so the
+algorithm itself isn't the issue.  The losing margin matches the
+broader pattern these experiments have surfaced: HotSpot's
+per-IntVector / per-LongVector op cost is roughly the same as BC's
+heavily-unrolled scalar G body, so the 4-way lane parallelism collapses
+back to ~1× — and the vector path additionally pays for 6 shuffles per
+round, four message-gather constructions per round, and the lane
+broadcasts at compress entry.
+
+The "BLAKE3 chunk-level parallelism" angle the doc also calls out
+would be more productive than the within-compress G vectorisation —
+hashing 8 independent 1 KiB chunks lane-parallel sidesteps the
+per-vector-op overhead by using each lane for a full sequential hash,
+the same shape as suggestion #7's WOTS chains but without WOTS's
+per-step ADRS bookkeeping.  That work isn't pursued here.
+
+The overlay defaults the gate to AVX-512 only (minLanes=8) — same
+posture as ChaCha / MLKEM / MLDSA / SHA-256 / SHA-512 in this tree —
+so production AVX2 hosts stay on the faster scalar path.  The JDK 25
+regression test task forces it on with
+`-Dorg.bouncycastle.blake2b.vector.minLanes=2` to keep the vector
+path covered by the suite.
+```
+
 ## Tier 2 — solid wins (2–3x)
 
 ### 4. Keccak θ and χ steps
