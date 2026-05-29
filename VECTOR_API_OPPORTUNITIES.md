@@ -125,6 +125,68 @@ row-wise `a ^ (~b & c)`. Both lane-parallel. ρ/π is a fixed permutation — tr
 Touches every SHA-3 / SHAKE call, including the SHAKE inside ML-KEM / ML-DSA,
 so wins compound with #2.
 
+Result:
+```
+The full Keccak-f[1600] permutation is correct end-to-end — FIPS-202
+SHA3-256("abc") and SHA3-512("abc") match the published vectors on
+both paths, and a cross-path fuzz across SHA3-{224,256,384,512},
+SHAKE128/256 with 4 KiB output, and the legacy KeccakDigest at
+{224,256,288,384,512} produces byte-identical digests via the
+KeccakDigest.forceScalarPath hook plus a direct kernel cross-check
+against KeccakPermutationScalar across 64 random states and 24 chained
+permutations.
+
+The state is held as five row-vectors P[0..4] in LongVector.SPECIES_512
+(eight physical lanes; lanes 0..4 carry the row, lanes 5..7 stay zero
+through the rotation table and shuffle layouts).  θ is one 5-way XOR
+reduction + lane-rotate-left/right shuffles + per-lane long ROL by 1.
+ρ is a per-row variable-amount lanewise ROL.  π is the cross-row
+position permutation, implemented as five 5-lane gathers via
+LongVector.lane reads + LongVector.fromArray.  χ is per-row,
+five-cycle lane shuffle plus XOR/AND/NOT.  ι is a scalar lane-0
+modify on P[0].  Five row-vectors stay register-resident across all
+24 rounds — no shuttling through long[25] memory between rounds.
+
+Bench (JDK 25, AVX2 host: LongVector.SPECIES_PREFERRED = 256-bit / 4 lanes):
+
+WARNING: Using incubator modules: jdk.incubator.vector
+Keccak-f[1600] permutation      vector:   57,68 us/op   scalar:    0,55 us/op   speedup: 0,01x
+SHA3-256 4 KiB                  vector: 1581,38 us/op   scalar:   15,86 us/op   speedup: 0,01x
+
+Net loss of ~100x on this AVX2 host.  The doc's "Tier 2 — solid wins
+(2-3x)" prediction does not hold via the JVM Vector API.  Two
+amplifying factors push this far below the other within-permutation
+ports in this tree (ChaCha 0.6x, Blake2b 0.76x):
+
+- SPECIES_512 with a 5-of-8 mask is heavily emulated on AVX2: the
+  JIT splits each masked op into two 4-wide AVX2 sub-ops with
+  per-lane mask handling, instead of mapping to a single AVX-512
+  instruction.  Every theta/rho/chi op pays this twice.
+- π's cross-row gather extracts 25 lanes per round through
+  LongVector.lane(int) and rebuilds five vectors via fromArray.
+  HotSpot stack-allocates the eight-long scratch but the per-lane
+  vextract chain — 600 lane reads per permutation, 24 rounds — is
+  what dominates the kernel time.
+
+The overlay defaults the gate to AVX-512 only (minLanes=8) — same
+posture as ChaCha / MLKEM / MLDSA / SHA-256 / SHA-512 / Blake2b in
+this tree — so production AVX2 hosts stay on the faster scalar path.
+The JDK 25 regression test task forces it on with
+`-Dorg.bouncycastle.keccak.vector.minLanes=2` to keep the vector
+path covered by the suite.
+
+AVX-512 hosts are expected to do better — vproldq (per-lane variable
+ROL) and native 8-wide masked ops fold most of the per-op overhead
+out — but no AVX-512 host was available locally to confirm.  A future
+attempt that wants to ship a fast scalar-beating Keccak via Vector
+API would likely need to abandon the within-permutation framing and
+batch four independent Keccak instances per vector (the Keccak Code
+Package "lane-of-state" pattern), which sidesteps both the masked
+SPECIES_512 cost (each lane is a different instance, no mask needed)
+and the π gather cost (π becomes per-instance in-vector, just shifts
+local state).
+```
+
 ### 5. GHASH / GCM Karatsuba multiply
 - `core/src/main/java/org/bouncycastle/crypto/modes/gcm/GCMUtil.java:153` (`multiply`, byte form)
 - Same file `:191` (long form), plus `GCMBlockCipher.java`
