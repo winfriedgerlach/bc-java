@@ -318,6 +318,73 @@ WotsPlus.pkGen is engaged on AVX-512 by default
 ladder. Cswap is a clean Vector mask+select. Carry propagation stays serial.
 ~1.5–2x, every TLS 1.3 handshake hits it.
 
+Result:
+```
+End-to-end X25519 scalarMult correctness: RFC 7748 §5.2 vectors 1
+and 2 match on both paths, and a 32-trial fuzz (random 32-byte
+scalar + random base) confirms vector dispatch produces byte-equal
+output to the forced-scalar path on the same JVM via the
+X25519Field.forceScalarPath hook.  Per-op kernel cross-checks across
+256 random limb sets confirm add / sub / apm / negate / copy / cmov
+/ cnegate / cswap match the static *Scalar references.
+
+Layout: 8 lanes of IntVector.SPECIES_256 for limbs 0..7, scalar tail
+for limbs 8..9 — keeps the kernel native-width on AVX2 (no masked
+load past int[10] bounds, no SPECIES_512 emulation).  The
+carry-bearing operations (mul / sqr / carry / reduce) stay scalar
+per the doc.
+
+Bench (JDK 25, AVX2 host: IntVector.SPECIES_PREFERRED = 256-bit / 8 lanes):
+
+WARNING: Using incubator modules: jdk.incubator.vector
+add        (10-limb)            vector:   0,0317 us/op   scalar:   0,0348 us/op   speedup: 1,10x
+sub        (10-limb)            vector:   0,0376 us/op   scalar:   0,0745 us/op   speedup: 1,98x
+apm        (10-limb)            vector:   0,0832 us/op   scalar:   0,0445 us/op   speedup: 0,54x
+cswap (swap=1)                  vector:   0,0310 us/op   scalar:   0,0362 us/op   speedup: 1,17x
+cmov  (cond=-1)                 vector:   0,0349 us/op   scalar:   0,0253 us/op   speedup: 0,73x
+X25519 scalarMult               vector: 86,7118 us/op    scalar: 92,7402 us/op    speedup: 1,07x
+
+The doc's ~1.5–2x prediction at the end-to-end level does not
+materialise: the vectorised carry-free ops are only ~10–15% of the
+total scalarMult cost (mul / sqr dominate, and those stay scalar),
+so even an idealised 2x on the carry-free portion would top out
+near 1.10–1.15x at the end-to-end level.  We measure ~1.07x, sitting
+in that band.  Per-kernel results are mixed:
+
+- sub at 1.98x is the clean win the doc forecasts.  Single
+  IntVector load + sub + store maps directly onto a 256-bit AVX2
+  pipeline op pair.
+- add at 1.10x is a near-wash.  The scalar 10-element loop is
+  already tight enough that the JIT auto-vectorises portions of it.
+- apm at 0.54x regresses despite doing twice the arithmetic of
+  add/sub.  Two vector stores (zp and zm) force the JIT through
+  more boxing of intermediate IntVector references than the
+  fused-loop scalar version, where the same xi/yi pair is reused
+  to compute both outputs in a single iteration.
+- cswap at 1.17x and cmov at 0.73x split the conditional family.
+  cswap's lane-wise XOR+AND+XOR pattern fits the IntVector ALU
+  well; cmov's IntVector.broadcast(SPECIES, cond) is apparently
+  more expensive than the inlined `&cond` C2 emits for the scalar
+  loop.
+- The end-to-end scalarMult win comes mostly from the sub speedup
+  amortised across ~250 ladder iterations.
+
+The overlay defaults the gate to AVX-512 only (minLanes=8) — same
+posture as ChaCha / MLKEM / MLDSA / SHA-256 / SHA-512 / Blake2b /
+Keccak — so production AVX2 hosts stay on the faster scalar path
+for the kernels that regress.  Override with
+`-Dorg.bouncycastle.x25519.vector.minLanes=2` to engage on AVX2
+(used by the JDK 25 regression test task and the bench above).
+
+The bigger door for X25519 is auto-vectorising mul/sqr — but
+those have intra-step long-multiply dependencies via the carry
+chain, and the doc explicitly excludes them.  An alternate
+representation (e.g. a 5×52-bit radix layout on 64-bit lanes,
+matching the BoringSSL fiat-crypto generator output) would change
+the vectorisation calculus, but that's a different field
+implementation, not a Vector API overlay over the existing one.
+```
+
 ### 9. ML-KEM PolyVec pointwise multiply / matrix-vector product
 - `core/src/main/java/org/bouncycastle/pqc/crypto/mlkem/PolyVec.java`
 - `core/src/main/java/org/bouncycastle/pqc/crypto/mlkem/Poly.java:43` (`baseMultMontgomery`)

@@ -546,7 +546,8 @@ task test25(type: Test) {
                '-Dorg.bouncycastle.sha512.vector.minLanes=2',
                '-Dorg.bouncycastle.slhdsa.wots.vector.minLanes=2',
                '-Dorg.bouncycastle.blake2b.vector.minLanes=2',
-               '-Dorg.bouncycastle.keccak.vector.minLanes=2']
+               '-Dorg.bouncycastle.keccak.vector.minLanes=2',
+               '-Dorg.bouncycastle.x25519.vector.minLanes=2']
 
 
     finalizedBy jacocoTestReport
